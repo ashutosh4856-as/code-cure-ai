@@ -1,15 +1,15 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { Send, Loader2, Code2, Mic, MicOff, Zap, Download, Eye, FolderOpen, X, Square } from 'lucide-react'
+import { Send, Loader2, Code2, Mic, MicOff, Zap, Download, Eye, FolderOpen, X, Square, Plus, ImageIcon, Camera } from 'lucide-react'
 import Sidebar from '@/components/Sidebar'
 import MessageBubble from '@/components/MessageBubble'
 import { getUser, getUserChats, createChat, saveMessage, getChatMessages, deleteChat, updateChatTitle } from '@/lib/supabase'
 
 const MODELS = [
-  { id: 'deepseek', label: '🧠 DeepSeek R1', desc: 'Best for coding' },
-  { id: 'llama', label: '🦙 Llama 3.3', desc: 'Fast & accurate' },
-  { id: 'gemini', label: '✨ Gemini Flash', desc: 'Creative' },
+  { id: 'deepseek', label: '🧠 DeepSeek R1' },
+  { id: 'llama', label: '🦙 Llama 3.3' },
+  { id: 'gemini', label: '✨ Gemini Flash' },
 ]
 
 export default function ChatPage() {
@@ -18,6 +18,8 @@ export default function ChatPage() {
   const inputRef = useRef(null)
   const recognitionRef = useRef(null)
   const abortRef = useRef(null)
+  const fileInputRef = useRef(null)
+  const cameraInputRef = useRef(null)
 
   const [user, setUser] = useState(null)
   const [chats, setChats] = useState([])
@@ -30,6 +32,9 @@ export default function ChatPage() {
   const [project, setProject] = useState(null)
   const [showPreview, setShowPreview] = useState(false)
   const [streamingText, setStreamingText] = useState('')
+  const [showPlusMenu, setShowPlusMenu] = useState(false)
+  const [attachedImage, setAttachedImage] = useState(null)
+  const [attachedImageBase64, setAttachedImageBase64] = useState(null)
 
   useEffect(() => { checkAuth() }, [])
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, streamingText])
@@ -46,11 +51,15 @@ export default function ChatPage() {
     setChats(data || [])
   }
 
-  const handleNewChat = () => { setActiveChatId(null); setMessages([]); setInput(''); setProject(null); setStreamingText('') }
+  const handleNewChat = () => { setActiveChatId(null); setMessages([]); setInput(''); setProject(null); setStreamingText(''); setAttachedImage(null); setAttachedImageBase64(null) }
   const handleSelectChat = async (chatId) => { setActiveChatId(chatId); const { data } = await getChatMessages(chatId); setMessages(data || []) }
   const handleDeleteChat = async (chatId) => { await deleteChat(chatId); if (activeChatId === chatId) handleNewChat(); loadChats(user.id) }
 
-  const stopGeneration = () => { abortRef.current?.abort(); setLoading(false); if (streamingText) { setMessages(prev => [...prev, { role: 'assistant', content: streamingText }]); setStreamingText('') } }
+  const stopGeneration = () => {
+    abortRef.current?.abort()
+    setLoading(false)
+    if (streamingText) { setMessages(prev => [...prev, { role: 'assistant', content: streamingText }]); setStreamingText('') }
+  }
 
   const toggleMic = () => {
     if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) { alert('Chrome use karo mic ke liye.'); return }
@@ -62,6 +71,16 @@ export default function ChatPage() {
     r.onerror = () => setIsListening(false)
     r.onend = () => setIsListening(false)
     recognitionRef.current = r; r.start(); setIsListening(true)
+  }
+
+  const handleImageSelect = (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setAttachedImage(file)
+    const reader = new FileReader()
+    reader.onload = (ev) => setAttachedImageBase64(ev.target.result)
+    reader.readAsDataURL(file)
+    setShowPlusMenu(false)
   }
 
   const generateProject = async (idea, chatId) => {
@@ -91,11 +110,17 @@ export default function ChatPage() {
   }
 
   const sendMessage = async () => {
-    if (!input.trim() || loading) return
-    const userMsg = { role: 'user', content: input.trim() }
-    const currentInput = input.trim()
+    if (!input.trim() && !attachedImage || loading) return
+    const currentInput = input.trim() || 'Is image mein kya error hai? Fix karo.'
+    const userMsg = {
+      role: 'user',
+      content: currentInput,
+      image: attachedImage ? attachedImageBase64 : null
+    }
     setMessages(prev => [...prev, userMsg])
     setInput('')
+    setAttachedImage(null)
+    setAttachedImageBase64(null)
     setLoading(true)
     setStreamingText('')
 
@@ -106,28 +131,32 @@ export default function ChatPage() {
     }
     if (chatId) await saveMessage(chatId, 'user', currentInput)
 
-    if (isProjectIdea(currentInput)) {
+    if (!attachedImage && isProjectIdea(currentInput)) {
       await generateProject(currentInput, chatId)
       setLoading(false)
       return
     }
 
-    // STREAMING
+    setStreamingText('...')
     try {
       const controller = new AbortController()
       abortRef.current = controller
 
+      const apiMessages = [...messages, userMsg].map(m => ({
+        role: m.role,
+        content: m.image
+          ? [{ type: 'text', text: m.content }, { type: 'image_url', image_url: { url: m.image } }]
+          : m.content
+      }))
+
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: [...messages, userMsg].map(m => ({ role: m.role, content: m.content })), model }),
+        body: JSON.stringify({ messages: apiMessages, model }),
         signal: controller.signal,
       })
 
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.error || 'API error')
-      }
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error || 'API error') }
 
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
@@ -141,18 +170,15 @@ export default function ChatPage() {
         setStreamingText(fullText)
       }
 
-      // Streaming done — add to messages
       setMessages(prev => [...prev, { role: 'assistant', content: fullText }])
       setStreamingText('')
-
       if (chatId) {
         await saveMessage(chatId, 'assistant', fullText)
         if (messages.length === 0) { await updateChatTitle(chatId, currentInput.slice(0, 50)); loadChats(user.id) }
       }
-
     } catch (err) {
       if (err.name !== 'AbortError') {
-        setMessages(prev => [...prev, { role: 'assistant', content: `❌ **Error:** ${err.message}\n\nOpenRouter API key check karo Vercel settings mein.` }])
+        setMessages(prev => [...prev, { role: 'assistant', content: `❌ **Error:** ${err.message}` }])
         setStreamingText('')
       }
     }
@@ -187,6 +213,10 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-screen bg-[#0a0a0f] overflow-hidden">
+      {/* Hidden file inputs */}
+      <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageSelect} />
+      <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleImageSelect} />
+
       <Sidebar chats={chats} activeChatId={activeChatId} onNewChat={handleNewChat} onSelectChat={handleSelectChat} onDeleteChat={handleDeleteChat} user={user} />
 
       <div className="flex-1 flex flex-col min-w-0">
@@ -198,12 +228,10 @@ export default function ChatPage() {
             </div>
             <span className="text-white font-bold">Coding AI</span>
           </div>
-          {/* Model selector */}
           <div className="flex bg-[#12121a] rounded-xl p-1 border border-[#1a1a27] gap-1">
             {MODELS.map(m => (
               <button key={m.id} onClick={() => setModel(m.id)}
-                title={m.desc}
-                className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${model === m.id ? 'bg-violet-600 text-white shadow-md' : 'text-slate-500 hover:text-white'}`}>
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${model === m.id ? 'bg-violet-600 text-white' : 'text-slate-500 hover:text-white'}`}>
                 {m.label}
               </button>
             ))}
@@ -221,7 +249,7 @@ export default function ChatPage() {
                 <div>
                   <h2 className="text-4xl font-bold text-white mb-3">Welcome, Coding AI! 👋</h2>
                   <p className="text-slate-400 text-lg">Error fix karo ya pura app idea do!</p>
-                  <p className="text-slate-600 text-sm mt-1">Hindi • Hinglish • English</p>
+                  <p className="text-slate-600 text-sm mt-1">Hindi • Hinglish • English • Screenshot bhi bhej sakte ho!</p>
                 </div>
                 <div className="grid grid-cols-2 gap-3 w-full max-w-lg">
                   {['Todo app banao', 'React useEffect fix karo', 'Portfolio website banao', 'Python API banao'].map(s => (
@@ -234,9 +262,17 @@ export default function ChatPage() {
               </div>
             )}
 
-            {messages.map((msg, i) => <MessageBubble key={i} message={msg} />)}
+            {messages.map((msg, i) => (
+              <div key={i}>
+                {msg.image && msg.role === 'user' && (
+                  <div className="flex justify-end mb-2">
+                    <img src={msg.image} alt="uploaded" className="max-w-[200px] rounded-xl border border-[#2d2d4a]" />
+                  </div>
+                )}
+                <MessageBubble message={msg} />
+              </div>
+            ))}
 
-            {/* Streaming text — live typing effect */}
             {streamingText && (
               <div className="flex gap-3">
                 <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-600 to-blue-600 flex items-center justify-center flex-shrink-0 mt-1">
@@ -244,7 +280,7 @@ export default function ChatPage() {
                 </div>
                 <div className="flex-1 max-w-[85%]">
                   <MessageBubble message={{ role: 'assistant', content: streamingText }} />
-                  <span className="inline-block w-2 h-4 bg-violet-400 ml-1 animate-pulse rounded-sm cursor-blink" />
+                  <span className="inline-block w-2 h-4 bg-violet-400 ml-1 animate-pulse rounded-sm" />
                 </div>
               </div>
             )}
@@ -258,17 +294,17 @@ export default function ChatPage() {
                   </div>
                   <div className="flex gap-2">
                     <button onClick={() => setShowPreview(true)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 text-blue-400 rounded-lg text-xs font-semibold">
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600/20 border border-blue-500/30 text-blue-400 rounded-lg text-xs font-semibold">
                       <Eye className="w-3.5 h-3.5" /> Preview
                     </button>
                     <button onClick={downloadZip}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600/20 hover:bg-green-600/30 border border-green-500/30 text-green-400 rounded-lg text-xs font-semibold">
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600/20 border border-green-500/30 text-green-400 rounded-lg text-xs font-semibold">
                       <Download className="w-3.5 h-3.5" /> ZIP
                     </button>
                   </div>
                 </div>
                 {project.files.map((f, i) => (
-                  <div key={i} className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#1a1a27] transition-colors">
+                  <div key={i} className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#1a1a27]">
                     <span className="text-xs">📄</span>
                     <span className="text-sm text-slate-300 font-mono">{f.path}</span>
                     <span className="text-xs text-slate-600 ml-auto">{f.description}</span>
@@ -280,32 +316,88 @@ export default function ChatPage() {
           </div>
         </div>
 
-        {/* Input */}
+        {/* Input Area — White Box */}
         <div className="border-t border-[#1a1a27] bg-[#0d0d14]/90 backdrop-blur-md p-4">
           <div className="max-w-3xl mx-auto">
-            <div className="relative bg-[#12121a] border border-[#2d2d4a] rounded-2xl focus-within:border-violet-500/50 transition-all shadow-xl">
-              <textarea ref={inputRef} value={input}
+            {/* Attached image preview */}
+            {attachedImage && (
+              <div className="mb-2 flex items-center gap-2 bg-[#12121a] border border-[#2d2d4a] rounded-xl px-3 py-2">
+                <ImageIcon className="w-4 h-4 text-violet-400" />
+                <span className="text-xs text-slate-300 truncate">{attachedImage.name}</span>
+                <button onClick={() => { setAttachedImage(null); setAttachedImageBase64(null) }} className="ml-auto text-slate-500 hover:text-red-400">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* White chatbox */}
+            <div className="relative bg-white rounded-2xl shadow-xl border border-gray-200 focus-within:border-violet-400 transition-all">
+              <textarea
+                ref={inputRef}
+                value={input}
                 onChange={e => { setInput(e.target.value); adjustHeight(e) }}
                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
-                placeholder="Error paste karo, app idea do ya sawaal pucho... (Enter = Send)"
-                className="w-full bg-transparent text-white placeholder-slate-600 text-sm resize-none outline-none px-5 pt-4 pb-14 leading-relaxed min-h-[56px] max-h-[200px]"
-                rows={1} style={{ height: '56px' }} />
-              <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between px-4 py-3">
-                <span className="text-xs text-slate-600 hidden sm:block">
-                  {MODELS.find(m => m.id === model)?.label} • App idea → pura project banega!
-                </span>
-                <div className="flex items-center gap-2 ml-auto">
-                  <button onClick={toggleMic}
-                    className={`p-2 rounded-xl transition-all ${isListening ? 'bg-red-500/20 text-red-400 animate-pulse' : 'text-slate-500 hover:text-slate-300 hover:bg-[#1a1a27]'}`}>
-                    {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                placeholder=""
+                className="w-full bg-transparent text-gray-900 text-sm resize-none outline-none px-4 pt-4 pb-14 leading-relaxed min-h-[56px] max-h-[200px]"
+                rows={1}
+                style={{ height: '56px' }}
+              />
+
+              {/* Bottom bar */}
+              <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between px-3 py-2.5 border-t border-gray-100">
+
+                {/* Plus button — left side */}
+                <div className="relative">
+                  <button
+                    onClick={() => setShowPlusMenu(!showPlusMenu)}
+                    className="p-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-600 transition-all">
+                    <Plus className="w-4 h-4" />
                   </button>
+
+                  {/* Plus dropdown menu */}
+                  {showPlusMenu && (
+                    <div className="absolute bottom-12 left-0 bg-white border border-gray-200 rounded-2xl shadow-2xl py-2 min-w-[180px] z-20">
+                      <button
+                        onClick={() => { fileInputRef.current?.click(); setShowPlusMenu(false) }}
+                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-gray-700 text-sm transition-colors">
+                        <ImageIcon className="w-4 h-4 text-violet-500" />
+                        Gallery se photo
+                      </button>
+                      <button
+                        onClick={() => { cameraInputRef.current?.click(); setShowPlusMenu(false) }}
+                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-gray-700 text-sm transition-colors">
+                        <Camera className="w-4 h-4 text-violet-500" />
+                        Camera se photo
+                      </button>
+                      <button
+                        onClick={() => { fileInputRef.current?.click(); setShowPlusMenu(false) }}
+                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-gray-700 text-sm transition-colors">
+                        <FolderOpen className="w-4 h-4 text-violet-500" />
+                        File upload
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Right buttons */}
+                <div className="flex items-center gap-2">
+                  {/* Orange Mic */}
+                  <button onClick={toggleMic}
+                    className={`p-2 rounded-xl transition-all ${isListening ? 'bg-orange-100 animate-pulse' : 'hover:bg-gray-100'}`}>
+                    {isListening
+                      ? <MicOff className="w-4 h-4 text-orange-500" />
+                      : <Mic className="w-4 h-4 text-orange-500" />
+                    }
+                  </button>
+
+                  {/* Send / Stop */}
                   {loading ? (
                     <button onClick={stopGeneration}
-                      className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-red-600/80 hover:bg-red-600 text-white text-xs font-semibold transition-all">
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-xs font-semibold transition-all">
                       <Square className="w-3.5 h-3.5" /> Roko
                     </button>
                   ) : (
-                    <button onClick={sendMessage} disabled={!input.trim()}
+                    <button onClick={sendMessage} disabled={!input.trim() && !attachedImage}
                       className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-30 disabled:cursor-not-allowed transition-all text-white text-xs font-semibold shadow-lg shadow-violet-500/20">
                       <Send className="w-3.5 h-3.5" /> Bhejo
                     </button>
@@ -317,27 +409,11 @@ export default function ChatPage() {
         </div>
       </div>
 
+      {/* Click outside to close plus menu */}
+      {showPlusMenu && <div className="fixed inset-0 z-10" onClick={() => setShowPlusMenu(false)} />}
+
       {/* Live Preview */}
       {showPreview && project && (
         <div className="fixed inset-0 bg-black/90 z-50 flex flex-col">
           <div className="flex items-center justify-between px-4 py-3 bg-[#1a1a27] border-b border-[#2d2d4a]">
-            <div className="flex items-center gap-2">
-              <Eye className="w-4 h-4 text-violet-400" />
-              <span className="text-white font-semibold text-sm">{project.name} — Live Preview</span>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={downloadZip} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600/20 border border-green-500/30 text-green-400 rounded-lg text-xs">
-                <Download className="w-3 h-3" /> ZIP
-              </button>
-              <button onClick={() => setShowPreview(false)} className="text-slate-400 hover:text-white p-1.5 hover:bg-[#2d2d4a] rounded-lg">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-          <iframe srcDoc={getPreviewHTML()} className="flex-1 w-full bg-white" title="Live Preview" sandbox="allow-scripts allow-same-origin" />
-        </div>
-      )}
-    </div>
-  )
-    }
-  
+       
